@@ -12,8 +12,6 @@ Ligações do projeto: ESP32 DevKit V1 + 2 motores 28BYJ-48 + 2 drivers ULN2003
 | Motor de passo 28BYJ-48 | 2   | 5V, unipolar, 64 passos/volta     |
 | Módulo driver ULN2003   | 2   | Acionamento dos motores           |
 | Fonte externa 5V        | 1   | Alimentação dos motores           |
-| LED                     | 1   | Indicador de estado               |
-| Resistor 220 Ω          | 1   | Limitador de corrente do LED      |
 | Jumpers                 | —   | Conexões entre componentes        |
 | Protoboard              | 1   | Montagem do circuito              |
 
@@ -53,13 +51,11 @@ O Motor 2 é responsável pela etapa de disparo e retorno à posição inicial.
 
 ---
 
-## 4. LED Indicador
+## 4. Indicação de Estado
 
-| ESP32 | Componente                  |
-|-------|-----------------------------|
-| D2    | Resistor 220 Ω → LED → GND |
+O firmware atual não usa LED externo dedicado no ESP32.
 
-O LED sinaliza o estado operacional do sistema (armado, disparando, em repouso).
+A indicação física durante movimento é feita pelos LEDs dos módulos ULN2003, que acendem conforme as bobinas dos motores são energizadas. O estado lógico do sistema é informado pelo aplicativo e pelo monitor serial com mensagens como `ARMANDO`, `ARMADA`, `DISPARANDO`, `FIM`, `ABORTADO` e `ERRO`.
 
 ---
 
@@ -75,6 +71,8 @@ Os motores **não** devem ser alimentados diretamente pelo ESP32, pois a corrent
 | Positivo (+)     | VCC do ULN2003 Motor 2 |
 | Negativo (−)     | GND do ULN2003 Motor 1 |
 | Negativo (−)     | GND do ULN2003 Motor 2 |
+
+> O driver ULN2003 pode aceitar tensões maiores, mas o motor usado é 28BYJ-48 5VDC. A tensão nominal do motor deve prevalecer. Testes com 4 pilhas de 1,5V geram aproximadamente 6V e devem ser feitos com atenção ao aquecimento.
 
 ---
 
@@ -115,12 +113,6 @@ O ESP32 é alimentado via porta USB. Opções:
 | D19        | M2    | IN2          |
 | D21        | M2    | IN3          |
 | D22        | M2    | IN4          |
-
-### LED
-
-| Pino ESP32 | Componente                  |
-|------------|-----------------------------|
-| D2         | Resistor 220 Ω → LED → GND |
 
 ### Alimentação
 

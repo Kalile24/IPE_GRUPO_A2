@@ -49,8 +49,6 @@ Driver ULN2003      Driver ULN2003
 | Motor de passo 28BYJ-48 | 2       | Armação e disparo             |
 | Driver ULN2003       | 2          | Acionamento dos motores       |
 | Fonte externa 5V     | 1          | Alimentação dos motores       |
-| LED                  | 1          | Indicador de estado           |
-| Resistor 220 Ω       | 1          | Limitador do LED              |
 
 ---
 
@@ -74,12 +72,6 @@ Driver ULN2003      Driver ULN2003
 | D21   | IN3             |
 | D22   | IN4             |
 
-### LED indicador
-
-| ESP32 | Componente              |
-|-------|-------------------------|
-| D2    | Resistor 220 Ω → LED → GND |
-
 ---
 
 ## Alimentação
@@ -100,6 +92,27 @@ Arquivo: [`hercules_firmware.ino`](hercules_firmware.ino)
 
 Desenvolvido em C++ com a Arduino IDE. O ESP32 recebe comandos via Bluetooth Serial e aciona os motores de passo por meio dos drivers ULN2003.
 
+Bibliotecas usadas:
+- `BluetoothSerial`
+- `AccelStepper`
+
+Comandos aceitos:
+- `ARMAR:numero_de_voltas` — arma a catapulta com o Motor 1.
+- `DISPARAR` — aciona o Motor 2 por 2 voltas e retorna 2 voltas.
+- `ABORT` — interrompe a operação e libera as bobinas.
+- `RESET` — limpa estado de erro/aborto.
+- `STATUS` — informa o estado atual.
+
+Mensagens principais enviadas ao app:
+- `ARMANDO`
+- `ARMADA`
+- `DISPARANDO`
+- `FIM`
+- `ABORTADO`
+- `ERRO`
+
+O Motor 1 não retorna após a armação, pois a retenção é feita pelo conjunto mecânico com engrenagens. O Motor 2 realiza o ciclo de disparo e retorno.
+
 ### Aplicativo Android
 
 Arquivo: [`Hercules_I_app.aia`](Hercules_I_app.aia)
@@ -110,7 +123,10 @@ Funcionalidades do app:
 - Conectar ao ESP32 via Bluetooth
 - Armar a catapulta (Motor 1)
 - Disparar (Motor 2)
-- Retornar à posição inicial (Motor 2 reverso)
+- Habilitar o disparo quando o ESP32 envia `ARMADA`
+- Retornar à posição inicial após o disparo do Motor 2
+
+O status operacional é indicado pelas mensagens no app e pelos LEDs dos módulos ULN2003 durante a energização das bobinas. Não há LED externo dedicado no firmware atual.
 
 ---
 
@@ -126,7 +142,7 @@ Consulte [`esquema_eletrico.md`](esquema_eletrico.md) para o detalhamento comple
 hercules-i/
 ├── README.md                  # Este arquivo
 ├── hercules_firmware.ino      # Firmware do ESP32
-├── Hercules_I_app.aia/        # Projeto do app Android (MIT App Inventor)
+├── Hercules_I_app.aia         # Projeto do app Android (MIT App Inventor)
 └── esquema_eletrico.md        # Esquema elétrico e ligações
 ```
 

@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include <Stepper.h>
+#include <AccelStepper.h>
 #include "BluetoothSerial.h"
 
 // =====================================================
@@ -8,15 +8,13 @@
 
 BluetoothSerial SerialBT;
 
-// Nome que aparecerá no Bluetooth do celular
 const char* BLUETOOTH_NAME = "Hercules_I";
 
 // =====================================================
-// Configurações dos motores 28BYJ-48 com ULN2003
+// Configuracoes dos motores 28BYJ-48 com ULN2003
 // =====================================================
 
-// 28BYJ-48 normalmente usa 2048 passos por volta
-const int STEPS_PER_REV = 2048;
+const long STEPS_PER_REV = 2048;
 
 // Motor 1 - Armar
 const int M1_IN1 = 26;
@@ -30,142 +28,213 @@ const int M2_IN2 = 19;
 const int M2_IN3 = 21;
 const int M2_IN4 = 22;
 
-// LED de status do ESP32
-const int LED_STATUS = 2;
+const float MOTOR1_MAX_SPEED_STEPS_S = 700.0;
+const float MOTOR1_ACCEL_STEPS_S2 = 350.0;
+const float MOTOR2_MAX_SPEED_STEPS_S = 900.0;
+const float MOTOR2_ACCEL_STEPS_S2 = 500.0;
+
+const long FIRING_STEPS = 2 * STEPS_PER_REV;
+const unsigned long FIRING_SETTLE_MS = 1000;
 
 // Ordem recomendada para 28BYJ-48 + ULN2003:
 // IN1, IN3, IN2, IN4
-Stepper motor1(STEPS_PER_REV, M1_IN1, M1_IN3, M1_IN2, M1_IN4);
-Stepper motor2(STEPS_PER_REV, M2_IN1, M2_IN3, M2_IN2, M2_IN4);
+AccelStepper motor1(AccelStepper::FULL4WIRE, M1_IN1, M1_IN3, M1_IN2, M1_IN4);
+AccelStepper motor2(AccelStepper::FULL4WIRE, M2_IN1, M2_IN3, M2_IN2, M2_IN4);
 
 // =====================================================
-// Estados do sistema
+// Maquina de estados
 // =====================================================
 
-bool sistemaArmado = false;
-bool motorExecutando = false;
+enum EstadoCatapulta {
+  IDLE,
+  ARMING,
+  ARMED,
+  FIRING_FORWARD,
+  FIRING_SETTLE,
+  FIRING_RETURN,
+  DONE,
+  ABORTED,
+  ERROR
+};
 
-// Velocidade dos motores em RPM
-const int MOTOR1_RPM = 10;
-const int MOTOR2_RPM = 10;
+struct SistemaCatapulta {
+  EstadoCatapulta estado = IDLE;
+  bool armado = false;
+  bool abortado = false;
+  bool erro = false;
+  float voltasSolicitadas = 0.0;
+  long alvoMotor1 = 0;
+  long alvoMotor2 = 0;
+  unsigned long instanteEspera = 0;
+  String ultimaFalha = "";
+};
+
+SistemaCatapulta sistema;
+
+struct EntradaComandos {
+  String buffer = "";
+  unsigned long ultimoByteMs = 0;
+};
+
+EntradaComandos entradaSerial;
+EntradaComandos entradaBluetooth;
 
 // =====================================================
-// Funções auxiliares
+// Funcoes auxiliares
 // =====================================================
 
-void enviarMensagem(String msg) {
-  Serial.println(msg);     // Envia para o Serial Monitor
-  SerialBT.println(msg);   // Envia para o app via Bluetooth
+void enviarMensagem(const String& msg) {
+  Serial.println(msg);
+  SerialBT.println(msg);
 }
 
-void ligarStatus() {
-  digitalWrite(LED_STATUS, HIGH);
+const char* nomeEstado(EstadoCatapulta estado) {
+  switch (estado) {
+    case IDLE:
+      return "IDLE";
+    case ARMING:
+      return "ARMANDO";
+    case ARMED:
+      return "ARMADA";
+    case FIRING_FORWARD:
+      return "DISPARANDO";
+    case FIRING_SETTLE:
+      return "AGUARDANDO_RETORNO";
+    case FIRING_RETURN:
+      return "RETORNANDO";
+    case DONE:
+      return "FIM";
+    case ABORTED:
+      return "ABORTADO";
+    case ERROR:
+      return "ERRO";
+  }
+
+  return "DESCONHECIDO";
 }
 
-void desligarStatus() {
-  digitalWrite(LED_STATUS, LOW);
-}
-
-void liberarBobinasMotor1() {
-  digitalWrite(M1_IN1, LOW);
-  digitalWrite(M1_IN2, LOW);
-  digitalWrite(M1_IN3, LOW);
-  digitalWrite(M1_IN4, LOW);
-}
-
-void liberarBobinasMotor2() {
-  digitalWrite(M2_IN1, LOW);
-  digitalWrite(M2_IN2, LOW);
-  digitalWrite(M2_IN3, LOW);
-  digitalWrite(M2_IN4, LOW);
+bool motorExecutando() {
+  return sistema.estado == ARMING ||
+         sistema.estado == FIRING_FORWARD ||
+         sistema.estado == FIRING_SETTLE ||
+         sistema.estado == FIRING_RETURN;
 }
 
 void liberarBobinas() {
-  liberarBobinasMotor1();
-  liberarBobinasMotor2();
+  motor1.disableOutputs();
+  motor2.disableOutputs();
 }
 
-// =====================================================
-// Motor 1 - Armar
-// =====================================================
+void prepararMotor1() {
+  motor1.enableOutputs();
+}
 
-void executarArmar(float voltas) {
-  if (motorExecutando) {
-    enviarMensagem("ERRO: Motor ja esta executando.");
+void prepararMotor2() {
+  motor2.enableOutputs();
+}
+
+void definirErro(const String& falha) {
+  sistema.estado = ERROR;
+  sistema.armado = false;
+  sistema.erro = true;
+  sistema.abortado = false;
+  sistema.ultimaFalha = falha;
+  liberarBobinas();
+  enviarMensagem("ERRO: " + falha);
+}
+
+void abortarOperacao() {
+  motor1.moveTo(motor1.currentPosition());
+  motor2.moveTo(motor2.currentPosition());
+
+  sistema.estado = ABORTED;
+  sistema.armado = false;
+  sistema.abortado = true;
+  sistema.erro = false;
+  sistema.ultimaFalha = "";
+
+  liberarBobinas();
+  enviarMensagem("ABORTADO");
+}
+
+void resetarSistema() {
+  motor1.setCurrentPosition(0);
+  motor2.setCurrentPosition(0);
+
+  sistema.estado = IDLE;
+  sistema.armado = false;
+  sistema.abortado = false;
+  sistema.erro = false;
+  sistema.voltasSolicitadas = 0.0;
+  sistema.alvoMotor1 = 0;
+  sistema.alvoMotor2 = 0;
+  sistema.instanteEspera = 0;
+  sistema.ultimaFalha = "";
+
+  liberarBobinas();
+  enviarMensagem("RESET_OK");
+}
+
+void iniciarArmar(float voltas) {
+  if (motorExecutando()) {
+    enviarMensagem("ERRO: Sistema em movimento.");
     return;
   }
 
-  if (voltas <= 0) {
-    enviarMensagem("ERRO: Numero de voltas invalido.");
+  if (sistema.estado == ABORTED || sistema.estado == ERROR) {
+    enviarMensagem("ERRO: Envie RESET antes de armar novamente.");
     return;
   }
 
-  motorExecutando = true;
-  sistemaArmado = false;
+  if (voltas <= 0.0) {
+    definirErro("Numero de voltas invalido.");
+    return;
+  }
 
-  long passos = round(voltas * STEPS_PER_REV);
+  sistema.estado = ARMING;
+  sistema.armado = false;
+  sistema.abortado = false;
+  sistema.erro = false;
+  sistema.voltasSolicitadas = voltas;
+  sistema.alvoMotor1 = motor1.currentPosition() + lround(voltas * STEPS_PER_REV);
+
+  prepararMotor1();
+  motor1.moveTo(sistema.alvoMotor1);
 
   enviarMensagem("ARMANDO");
-  ligarStatus();
-
-  // Motor 1 gira o número de voltas definido no app
-  motor1.step(passos);
-
-  // Espera 1 segundo
-  delay(1000);
-
-  // Motor 1 retorna o mesmo número de voltas
-  motor1.step(-passos);
-
-  desligarStatus();
-  liberarBobinasMotor1();
-
-  sistemaArmado = true;
-  motorExecutando = false;
-
-  // Sinal enviado para o app habilitar o botão Lançar
-  enviarMensagem("S");
 }
 
-// =====================================================
-// Motor 2 - Disparar
-// =====================================================
-
-void executarDisparo() {
-  if (motorExecutando) {
-    enviarMensagem("ERRO: Motor ja esta executando.");
+void iniciarDisparo() {
+  if (motorExecutando()) {
+    enviarMensagem("ERRO: Sistema em movimento.");
     return;
   }
 
-  if (!sistemaArmado) {
+  if (!sistema.armado || sistema.estado != ARMED) {
     enviarMensagem("ERRO: Sistema ainda nao esta armado.");
     return;
   }
 
-  motorExecutando = true;
-  sistemaArmado = false;
+  sistema.estado = FIRING_FORWARD;
+  sistema.armado = false;
+  sistema.alvoMotor2 = motor2.currentPosition() + FIRING_STEPS;
+
+  prepararMotor2();
+  motor2.moveTo(sistema.alvoMotor2);
 
   enviarMensagem("DISPARANDO");
-  ligarStatus();
+}
 
-  // 180 graus = meia volta
-  int passos180 = STEPS_PER_REV / 2;
+void enviarStatus() {
+  String status = "STATUS: ";
+  status += nomeEstado(sistema.estado);
 
-  // Motor 2 gira 180 graus
-  motor2.step(passos180);
+  if (sistema.estado == ERROR && sistema.ultimaFalha.length() > 0) {
+    status += " - ";
+    status += sistema.ultimaFalha;
+  }
 
-  // Espera 3 segundos
-  delay(3000);
-
-  // Motor 2 retorna 180 graus
-  motor2.step(-passos180);
-
-  desligarStatus();
-  liberarBobinasMotor2();
-
-  motorExecutando = false;
-
-  enviarMensagem("FIM");
+  enviarMensagem(status);
 }
 
 // =====================================================
@@ -183,37 +252,121 @@ void tratarComando(String comando) {
   Serial.print("Comando recebido: ");
   Serial.println(comando);
 
-  // Comando vindo do app:
-  // ARMAR:3
-  // ARMAR:2.5
+  if (comando == "ABORT") {
+    abortarOperacao();
+    return;
+  }
+
+  if (comando == "RESET") {
+    resetarSistema();
+    return;
+  }
+
+  if (comando == "STATUS") {
+    enviarStatus();
+    return;
+  }
+
   if (comando.startsWith("ARMAR:")) {
     String valor = comando.substring(6);
-    float voltas = valor.toFloat();
-
-    executarArmar(voltas);
+    iniciarArmar(valor.toFloat());
     return;
   }
 
-  // Comando vindo do app:
-  // DISPARAR
   if (comando == "DISPARAR") {
-    executarDisparo();
-    return;
-  }
-
-  // Comando de teste pelo Serial Monitor
-  if (comando == "STATUS") {
-    if (motorExecutando) {
-      enviarMensagem("STATUS: EXECUTANDO");
-    } else if (sistemaArmado) {
-      enviarMensagem("STATUS: ARMADO");
-    } else {
-      enviarMensagem("STATUS: NAO_ARMADO");
-    }
+    iniciarDisparo();
     return;
   }
 
   enviarMensagem("ERRO: Comando desconhecido.");
+}
+
+void processarLinhasCompletas(EntradaComandos& entrada) {
+  String& buffer = entrada.buffer;
+  int fimLinha = buffer.indexOf('\n');
+
+  while (fimLinha >= 0) {
+    String comando = buffer.substring(0, fimLinha);
+    buffer.remove(0, fimLinha + 1);
+    tratarComando(comando);
+    fimLinha = buffer.indexOf('\n');
+  }
+}
+
+void processarComandoPendente(EntradaComandos& entrada) {
+  if (entrada.buffer.length() == 0) {
+    return;
+  }
+
+  if (millis() - entrada.ultimoByteMs < 30) {
+    return;
+  }
+
+  String comando = entrada.buffer;
+  entrada.buffer = "";
+  tratarComando(comando);
+}
+
+void lerComandos(Stream& origem, EntradaComandos& entrada) {
+  while (origem.available()) {
+    char c = origem.read();
+    entrada.buffer += c;
+    entrada.ultimoByteMs = millis();
+  }
+
+  processarLinhasCompletas(entrada);
+  processarComandoPendente(entrada);
+}
+
+// =====================================================
+// Atualizacao da FSM
+// =====================================================
+
+void atualizarEstado() {
+  motor1.run();
+  motor2.run();
+
+  switch (sistema.estado) {
+    case IDLE:
+    case ARMED:
+    case DONE:
+    case ABORTED:
+    case ERROR:
+      break;
+
+    case ARMING:
+      if (motor1.distanceToGo() == 0) {
+        motor1.disableOutputs();
+        sistema.estado = ARMED;
+        sistema.armado = true;
+        enviarMensagem("ARMADA");
+      }
+      break;
+
+    case FIRING_FORWARD:
+      if (motor2.distanceToGo() == 0) {
+        sistema.estado = FIRING_SETTLE;
+        sistema.instanteEspera = millis();
+      }
+      break;
+
+    case FIRING_SETTLE:
+      if (millis() - sistema.instanteEspera >= FIRING_SETTLE_MS) {
+        sistema.estado = FIRING_RETURN;
+        sistema.alvoMotor2 = motor2.currentPosition() - FIRING_STEPS;
+        motor2.moveTo(sistema.alvoMotor2);
+      }
+      break;
+
+    case FIRING_RETURN:
+      if (motor2.distanceToGo() == 0) {
+        motor2.setCurrentPosition(0);
+        motor2.disableOutputs();
+        sistema.estado = DONE;
+        enviarMensagem("FIM");
+      }
+      break;
+  }
 }
 
 // =====================================================
@@ -222,33 +375,25 @@ void tratarComando(String comando) {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(20);
 
-  // Inicia Bluetooth clássico do ESP32
   SerialBT.begin(BLUETOOTH_NAME);
+  SerialBT.setTimeout(20);
 
-  pinMode(LED_STATUS, OUTPUT);
-  digitalWrite(LED_STATUS, LOW);
-
-  pinMode(M1_IN1, OUTPUT);
-  pinMode(M1_IN2, OUTPUT);
-  pinMode(M1_IN3, OUTPUT);
-  pinMode(M1_IN4, OUTPUT);
-
-  pinMode(M2_IN1, OUTPUT);
-  pinMode(M2_IN2, OUTPUT);
-  pinMode(M2_IN3, OUTPUT);
-  pinMode(M2_IN4, OUTPUT);
-
-  motor1.setSpeed(MOTOR1_RPM);
-  motor2.setSpeed(MOTOR2_RPM);
+  motor1.setMaxSpeed(MOTOR1_MAX_SPEED_STEPS_S);
+  motor1.setAcceleration(MOTOR1_ACCEL_STEPS_S2);
+  motor2.setMaxSpeed(MOTOR2_MAX_SPEED_STEPS_S);
+  motor2.setAcceleration(MOTOR2_ACCEL_STEPS_S2);
 
   liberarBobinas();
 
   enviarMensagem("ESP32 iniciado.");
-  enviarMensagem("Bluetooth: Catapulta_ESP32");
+  enviarMensagem("Bluetooth: Hercules_I");
   enviarMensagem("Comandos disponiveis:");
   enviarMensagem("ARMAR:numero_de_voltas");
   enviarMensagem("DISPARAR");
+  enviarMensagem("ABORT");
+  enviarMensagem("RESET");
   enviarMensagem("STATUS");
 }
 
@@ -257,15 +402,7 @@ void setup() {
 // =====================================================
 
 void loop() {
-  // Teste pelo Serial Monitor da Arduino IDE
-  if (Serial.available()) {
-    String comando = Serial.readStringUntil('\n');
-    tratarComando(comando);
-  }
-
-  // Comandos recebidos pelo app via Bluetooth
-  if (SerialBT.available()) {
-    String comando = SerialBT.readStringUntil('\n');
-    tratarComando(comando);
-  }
+  lerComandos(Serial, entradaSerial);
+  lerComandos(SerialBT, entradaBluetooth);
+  atualizarEstado();
 }
