@@ -28,10 +28,10 @@ const int M2_IN2 = 19;
 const int M2_IN3 = 21;
 const int M2_IN4 = 22;
 
-const float MOTOR1_MAX_SPEED_STEPS_S = 700.0;
-const float MOTOR1_ACCEL_STEPS_S2 = 350.0;
-const float MOTOR2_MAX_SPEED_STEPS_S = 900.0;
-const float MOTOR2_ACCEL_STEPS_S2 = 500.0;
+const float MOTOR1_MAX_SPEED_STEPS_S = 350.0;
+const float MOTOR1_ACCEL_STEPS_S2 = 200.0;
+const float MOTOR2_MAX_SPEED_STEPS_S = 500.0;
+const float MOTOR2_ACCEL_STEPS_S2 = 250.0;
 
 const long FIRING_STEPS = 2 * STEPS_PER_REV;
 const unsigned long FIRING_SETTLE_MS = 1000;
@@ -196,7 +196,7 @@ void iniciarArmar(float voltas) {
   sistema.abortado = false;
   sistema.erro = false;
   sistema.voltasSolicitadas = voltas;
-  sistema.alvoMotor1 = motor1.currentPosition() + lround(voltas * STEPS_PER_REV);
+  sistema.alvoMotor1 = motor1.currentPosition() + lround(-voltas * STEPS_PER_REV);
 
   prepararMotor1();
   motor1.moveTo(sistema.alvoMotor1);
@@ -339,7 +339,7 @@ void atualizarEstado() {
         motor1.disableOutputs();
         sistema.estado = ARMED;
         sistema.armado = true;
-        enviarMensagem("ARMADA");
+        enviarMensagem("ARMADA S");
       }
       break;
 
